@@ -61,7 +61,7 @@ html, body { margin: 0; padding: 0; }
    queda recortado dentro del contenedor y no se ven todas las opciones.
    El redondeo lo hacen las filas de los extremos. */
 .rows{display:flex;flex-direction:column;gap:1px;background:var(--line);border:1px solid var(--line);
-  border-radius:5px;}
+  border-radius:5px;position:relative;}
 .rowwrap{overflow:hidden;}
 .rows > div:first-child .rowwrap{border-radius:4px 4px 0 0;}
 .rows > div:last-child:not(:has(.det)) .rowwrap{border-radius:0 0 4px 4px;}
@@ -142,6 +142,16 @@ html, body { margin: 0; padding: 0; }
 .ordbtn{width:20px;height:18px;display:grid;place-items:center;color:var(--dim2);border-radius:3px;}
 .ordbtn:hover{color:var(--tx);background:#E7EEF1;}
 .ordbtn:disabled{opacity:.25;cursor:default;}
+.manija{cursor:grab;touch-action:none;margin-bottom:2px;}
+.manija:active{cursor:grabbing;}
+/* el hueco: el lugar donde va a caer la fila mientras se la arrastra */
+.fila.hueco{background:#E9F1F4;}
+.fila.hueco .rowwrap{visibility:hidden;}
+/* la copia que sigue al dedo, despegada de la lista */
+.flotante{position:fixed;z-index:60;pointer-events:none;cursor:grabbing;
+  filter:drop-shadow(0 10px 22px rgba(22,34,42,.22));}
+.flotante .rows{border-color:#1C7CA3;}
+.flotante .rowwrap{opacity:.97;}
 
 /* detalle */
 .det{background:#F7FAFB;border-top:1px solid var(--line);padding:14px 14px 16px 27px;}
