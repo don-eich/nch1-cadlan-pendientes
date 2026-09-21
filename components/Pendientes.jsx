@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Search, Plus, ChevronRight, ChevronUp, ChevronDown, X, Download,
-  Trash2, SlidersHorizontal, RefreshCw, CalendarClock, Ban, Link2, FileText,
+  Trash2, SlidersHorizontal, RefreshCw, CalendarClock, Ban, Link2, FileText, GripVertical,
 } from "lucide-react";
 import { cargar, aplicar, getModo } from "../lib/store.js";
 import {
@@ -284,23 +284,170 @@ export default function Pendientes() {
     setOpen(row.id);
   };
 
-  /* Reordena dentro del área, sobre la lista completa (no la filtrada),
-     de modo que la posición sea siempre la misma la vea quien la vea. */
+  /* ── reordenar ──────────────────────────────────────────────────────
+     El orden vive en el campo `orden` y solo lo tocan estas funciones.
+     Se trabaja sobre el grupo COMPLETO del área, pero la referencia la dan
+     las filas que el usuario tiene a la vista: con filtros puestos, la fila
+     cae donde la ve caer.
+
+     Los `orden` son globales dentro de la lista, no por área: las filas de
+     un área están salpicadas entre las de las otras. Por eso el grupo se
+     reordena REUSANDO los mismos valores de `orden` que ya ocupaba, en vez
+     de renumerarlos de a 100. Así el área conserva sus lugares en el orden
+     global y no pisa a ninguna otra; lo único que cambia es quién ocupa
+     cada lugar. */
+  const colocar = (id, refId, antes) => {
+    const t = todas.find((x) => x.id === id);
+    if (!t || id === refId) return;
+    const area = t.area || "";
+    const grupo = items
+      .filter((x) => (x.area || "") === area)
+      .sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0) || (a.item ?? 0) - (b.item ?? 0));
+    const sin = grupo.filter((x) => x.id !== id);
+    const k = sin.findIndex((x) => x.id === refId);
+    if (k < 0) return;
+    const pos = antes ? k : k + 1;
+    const nuevo = [...sin.slice(0, pos), t, ...sin.slice(pos)];
+
+    /* Los lugares que el grupo ya ocupaba, de menor a mayor. Si venían
+       empatados (quedaron ceros de la carga vieja), se separan de a 1, que
+       entra de sobra entre dos lugares reales. */
+    const huecos = grupo.map((x) => x.orden ?? 0).sort((a, b) => a - b);
+    for (let n = 1; n < huecos.length; n++) {
+      if (huecos[n] <= huecos[n - 1]) huecos[n] = huecos[n - 1] + 1;
+    }
+
+    const mapa = {};
+    const ops = [];
+    nuevo.forEach((x, n) => {
+      const orden = huecos[n];
+      if (x.orden === orden) return;
+      const row = { ...x, orden };
+      mapa[x.id] = row;
+      ops.push({ tipo: "tarea", accion: "upsert", row });
+    });
+    if (!ops.length) return;
+    commit({ ...data, tareas: todas.map((x) => mapa[x.id] || x) }, ops);
+  };
+
+  /* Las flechas mueven un lugar respecto de lo que se ve, no de la lista
+     completa: si un filtro esconde la fila de al lado, «subir» la saltea.
+     Es lo que espera cualquiera que esté mirando la pantalla. */
   const mover = (id, dir) => {
     const t = todas.find((x) => x.id === id);
     if (!t) return;
-    const grupo = items.filter((x) => (x.area || "") === (t.area || "")).sort((a, b) => a.orden - b.orden);
-    const i = grupo.findIndex((x) => x.id === id);
+    const vis = visibles.filter((x) => (x.area || "") === (t.area || ""));
+    const i = vis.findIndex((x) => x.id === id);
+    if (i < 0) return;
     const j = dir === "up" ? i - 1 : i + 1;
-    if (j < 0 || j >= grupo.length) return;
-    const a = { ...grupo[i], orden: grupo[j].orden };
-    const b = { ...grupo[j], orden: grupo[i].orden };
-    const mapa = { [a.id]: a, [b.id]: b };
-    commit({ ...data, tareas: todas.map((x) => mapa[x.id] || x) }, [
-      { tipo: "tarea", accion: "upsert", row: a },
-      { tipo: "tarea", accion: "upsert", row: b },
-    ]);
+    if (j < 0 || j >= vis.length) return;
+    colocar(id, vis[j].id, dir === "up");
   };
+
+  /* Arrastrar para reordenar. Va con pointer events y no con la API de
+     drag & drop del navegador, que en el celular directamente no existe.
+     El arrastre arranca solo desde la manija, así el dedo sigue pudiendo
+     scrollear la lista en cualquier otro lado de la fila. */
+  const [arrastre, setArrastre] = useState(null);
+  const arrRef = useRef(null);
+  const flotaRef = useRef(null);
+
+  const dragInicio = (e, it) => {
+    e.preventDefault();
+    e.stopPropagation();
+    document.body.style.userSelect = "none";
+    /* La caja de la fila al momento de agarrarla: con eso la copia flotante
+       arranca exactamente encima del original, y `agarre` guarda a qué altura
+       de la fila la agarró el dedo, para que no salte al empezar. */
+    const fila = e.currentTarget.closest("[data-fila='1']");
+    const r = fila ? fila.getBoundingClientRect() : null;
+    arrRef.current = {
+      id: it.id,
+      area: it.area || "",
+      sobre: null,
+      antes: false,
+      caja: r ? { top: r.top, left: r.left, width: r.width } : null,
+      agarre: r ? e.clientY - r.top : 0,
+    };
+    setArrastre(arrRef.current);
+    window.addEventListener("pointermove", onMoveWin);
+    window.addEventListener("pointerup", onUpWin);
+    window.addEventListener("pointercancel", onUpWin);
+  };
+
+  /* Dónde caería la fila si soltara acá. Se mide con offsetTop y no con
+     getBoundingClientRect porque las filas están animándose mientras tanto:
+     el rect devuelve la posición a mitad de animación y el destino saltaría
+     solo. offsetTop es la posición de layout, que no se mueve. */
+  const dragMueve = (e) => {
+    const d = arrRef.current;
+    if (!d) return;
+    /* La copia flotante sigue al dedo en cada movimiento. Se mueve tocando el
+       style directo y no el estado de React: son decenas de eventos por
+       segundo y no hace falta volver a dibujar la lista entera por cada uno.
+       El estado solo cambia cuando cambia el lugar de destino. */
+    if (flotaRef.current && d.caja) {
+      flotaRef.current.style.transform = `translateY(${e.clientY - d.agarre - d.caja.top}px)`;
+    }
+    const todasFilas = document.querySelectorAll("[data-fila='1']");
+    const otras = [];
+    todasFilas.forEach((el) => {
+      if (el.getAttribute("data-area") !== d.area) return;
+      if (el.getAttribute("data-tid") === d.id) return;
+      otras.push(el);
+    });
+    if (!otras.length) return;
+    const cont = otras[0].offsetParent;
+    if (!cont) return;
+    const y = e.clientY - cont.getBoundingClientRect().top;
+
+    let sobre = null;
+    let antes = false;
+    for (const el of otras) {
+      if (y < el.offsetTop + el.offsetHeight / 2) {
+        sobre = el.getAttribute("data-tid");
+        antes = true;
+        break;
+      }
+    }
+    if (!sobre) {
+      sobre = otras[otras.length - 1].getAttribute("data-tid");
+      antes = false;
+    }
+    if (d.sobre === sobre && d.antes === antes) return;
+    arrRef.current = { ...d, sobre, antes };
+    setArrastre(arrRef.current);
+  };
+
+  const dragFin = () => {
+    const d = arrRef.current;
+    if (!d) return;
+    arrRef.current = null;
+    setArrastre(null);
+    document.body.style.userSelect = "";
+    window.removeEventListener("pointermove", onMoveWin);
+    window.removeEventListener("pointerup", onUpWin);
+    window.removeEventListener("pointercancel", onUpWin);
+    if (d.sobre) colocar(d.id, d.sobre, d.antes);
+  };
+
+  /* Los listeners van en window y no en la manija. Al reordenar la lista en
+     vivo, React mueve el nodo de la fila dentro del DOM, y mover un nodo
+     cancela el pointer capture sin avisar: el arrastre se moría en el primer
+     salto y el soltar nunca llegaba. Atado a window sobrevive a cualquier
+     reordenamiento. Los refs mantienen una identidad estable para poder
+     desengancharlos, apuntando siempre a la versión más nueva. */
+  const vivos = useRef({});
+  vivos.current.mueve = dragMueve;
+  vivos.current.fin = dragFin;
+  const onMoveWin = useRef((e) => vivos.current.mueve(e)).current;
+  const onUpWin = useRef(() => vivos.current.fin()).current;
+
+  useEffect(() => () => {
+    window.removeEventListener("pointermove", onMoveWin);
+    window.removeEventListener("pointerup", onUpWin);
+    window.removeEventListener("pointercancel", onUpWin);
+  }, [onMoveWin, onUpWin]);
 
   /* ── mutaciones del catálogo ── */
 
@@ -453,23 +600,64 @@ export default function Pendientes() {
     );
   }, [visibles, areas]);
 
-  const bordes = useMemo(() => {
-    // primero/último de cada área en la lista COMPLETA, para deshabilitar flechas
-    const m = {};
-    const porArea = new Map();
-    items.forEach((i) => {
-      const k = i.area || "";
-      if (!porArea.has(k)) porArea.set(k, []);
-      porArea.get(k).push(i);
+  /* Mientras se arrastra, la lista se muestra YA reordenada: la fila viaja
+     con el cursor y las demás se corren para hacerle lugar. Es una vista
+     previa, no toca los datos; recién al soltar se escribe. */
+  const gruposVista = useMemo(() => {
+    if (!arrastre || !arrastre.sobre) return grupos;
+    return grupos.map(([area, arr]) => {
+      const t = arr.find((x) => x.id === arrastre.id);
+      if (!t) return [area, arr];
+      const sin = arr.filter((x) => x.id !== arrastre.id);
+      const k = sin.findIndex((x) => x.id === arrastre.sobre);
+      if (k < 0) return [area, arr];
+      const pos = arrastre.antes ? k : k + 1;
+      return [area, [...sin.slice(0, pos), t, ...sin.slice(pos)]];
     });
-    porArea.forEach((arr) => {
-      const s = [...arr].sort((a, b) => a.orden - b.orden);
-      s.forEach((i, n) => {
-        m[i.id] = { primero: n === 0, ultimo: n === s.length - 1 };
+  }, [grupos, arrastre]);
+
+  /* FLIP: se anota dónde estaba cada fila, y cuando cambian de lugar se las
+     anima desde la posición vieja a la nueva. Sin esto las filas saltan de
+     golpe y el arrastre se siente duro. Solo corre mientras hay arrastre. */
+  const posRef = useRef(null);
+  useLayoutEffect(() => {
+    if (typeof document === "undefined") return;
+    if (!arrastre) { posRef.current = null; return; }
+    const filas = document.querySelectorAll("[data-fila='1']");
+    const ahora = new Map();
+    filas.forEach((el) => ahora.set(el.getAttribute("data-tid"), el.getBoundingClientRect().top));
+    const antes = posRef.current;
+    posRef.current = ahora;
+    if (!antes) return;
+    filas.forEach((el) => {
+      const id = el.getAttribute("data-tid");
+      const y0 = antes.get(id);
+      const y1 = ahora.get(id);
+      if (y0 === undefined || Math.abs(y0 - y1) < 1) return;
+      if (typeof el.animate !== "function") return;
+      el.animate(
+        [{ transform: `translateY(${y0 - y1}px)` }, { transform: "translateY(0)" }],
+        { duration: 130, easing: "cubic-bezier(.2,.8,.3,1)" }
+      );
+    });
+  }, [gruposVista, arrastre]);
+
+  const filaArrastrada = useMemo(
+    () => (arrastre ? todas.find((x) => x.id === arrastre.id) : null),
+    [arrastre, todas]
+  );
+
+  const bordes = useMemo(() => {
+    /* primero/último de cada área ENTRE LAS FILAS VISIBLES: la flecha se
+       apaga según lo que hay en pantalla, no según la lista completa. */
+    const m = {};
+    grupos.forEach(([, arr]) => {
+      arr.forEach((i, n) => {
+        m[i.id] = { primero: n === 0, ultimo: n === arr.length - 1 };
       });
     });
     return m;
-  }, [items]);
+  }, [grupos]);
 
   const exportar = () => {
     const cab = ["Lista", "Item", "Orden", "Fecha", "Fecha limite", "Area", "Sub-area", "Equipo", "Descripcion", "Documento", "Urgencia", "Responsables", "Estado", "Bloqueada por", "Bloquea a", "Planteado", "Via", "Notas"];
@@ -629,7 +817,7 @@ export default function Pendientes() {
             <button className="btn" style={{ marginTop: 12 }} onClick={() => { setQ(""); setFArea(""); setFResp(""); setFEstado(""); setSoloVencidas(false); setSoloBloqueadas(false); }}>Limpiar filtros</button>
           </div>
         ) : (
-          grupos.map(([area, list]) => (
+          gruposVista.map(([area, list]) => (
             <section className="grp" key={area}>
               <div className="grp-hd">
                 <h3>{area}</h3>
@@ -652,6 +840,8 @@ export default function Pendientes() {
                     onChange={(p) => update(it.id, p)}
                     onDelete={() => remove(it.id)}
                     onMover={(d) => mover(it.id, d)}
+                    arrastrando={!!arrastre && arrastre.id === it.id}
+                    onDragInicio={(e) => dragInicio(e, it)}
                     onVincular={vincular}
                     onDesvincular={desvincular}
                     onIr={irA}
@@ -662,9 +852,39 @@ export default function Pendientes() {
           ))
         )}
 
+        {/* La fila que se está moviendo, despegada de la lista y pegada al
+            dedo. En la lista queda el hueco gris marcando dónde va a caer. */}
+        {arrastre && arrastre.caja && filaArrastrada && (
+          <div className="flotante" ref={flotaRef}
+            style={{ top: arrastre.caja.top, left: arrastre.caja.left, width: arrastre.caja.width }}>
+            <div className="rows">
+              <Item
+                fantasma
+                it={filaArrastrada}
+                externo={lista === "externos"}
+                open={false}
+                borde={{}}
+                areas={areas}
+                subareas={subareasDe(filaArrastrada.area)}
+                resps={resps}
+                todas={todas}
+                bloqueos={bloqueos}
+                onOpen={() => {}}
+                onChange={() => {}}
+                onDelete={() => {}}
+                onMover={() => {}}
+                onDragInicio={() => {}}
+                onVincular={() => {}}
+                onDesvincular={() => {}}
+                onIr={() => {}}
+              />
+            </div>
+          </div>
+        )}
+
         <p className="note">
           {lista === "internos"
-            ? "Trabajo del equipo propio. El orden de las filas lo fijan las flechas de la derecha: cambiar estado, urgencia o responsable no mueve nada de lugar. Una tarea «bloqueada» espera a que se resuelva otra; se vincula desde el detalle."
+            ? "Trabajo del equipo propio. El orden se cambia arrastrando una fila desde la manija de la derecha, o con las flechas de a un lugar; siempre dentro de la misma área. Cambiar estado, urgencia o responsable no mueve nada de lugar. Una tarea «bloqueada» espera a que se resuelva otra; se vincula desde el detalle."
             : "Dependencias de terceros. «Planteado» indica si ya se le pasó formalmente al responsable externo; los días abiertos cuentan desde la fecha en que se detectó."}
         </p>
         </>)}
@@ -797,7 +1017,7 @@ function Dependencias({ it, todas, bloqueos, onVincular, onDesvincular, onIr }) 
   );
 }
 
-function Item({ it, open, onOpen, onChange, onDelete, onMover, externo, borde, areas, subareas, resps, todas, bloqueos, onVincular, onDesvincular, onIr }) {
+function Item({ it, open, onOpen, onChange, onDelete, onMover, externo, borde, areas, subareas, resps, todas, bloqueos, onVincular, onDesvincular, onIr, arrastrando, onDragInicio, fantasma }) {
   const est = ESTADOS[it.estado] || ESTADOS.pendiente;
   const dias = diasAbierto(it.fecha);
   const viejo = it.estado !== "resuelto" && dias !== null && dias > 21;
@@ -807,7 +1027,12 @@ function Item({ it, open, onOpen, onChange, onDelete, onMover, externo, borde, a
   const bloqueaA = bloqueadasPor(it.id, bloqueos).map((id) => porId.get(id)).filter((t) => t && t.estado !== "resuelto");
 
   return (
-    <div>
+    <div
+      data-tid={fantasma ? undefined : it.id}
+      data-area={fantasma ? undefined : it.area || ""}
+      data-fila={fantasma ? undefined : "1"}
+      className={"fila" + (arrastrando ? " hueco" : "")}
+    >
       <div className="rowwrap">
         <button className="row" onClick={onOpen} aria-expanded={open}>
           <div className="edge" style={{ background: est.color }} />
@@ -853,10 +1078,19 @@ function Item({ it, open, onOpen, onChange, onDelete, onMover, externo, borde, a
           </div>
         </button>
         <div className="ordcol">
-          <button className="ordbtn" onClick={() => onMover("up")} disabled={borde.primero} title="Subir dentro del área">
+          <button
+            className="ordbtn manija"
+            title="Arrastrar para cambiar el orden dentro del área"
+            aria-label="Arrastrar para reordenar"
+            onPointerDown={onDragInicio}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <GripVertical size={14} />
+          </button>
+          <button className="ordbtn" onClick={() => onMover("up")} disabled={borde.primero} title="Subir un lugar">
             <ChevronUp size={14} />
           </button>
-          <button className="ordbtn" onClick={() => onMover("down")} disabled={borde.ultimo} title="Bajar dentro del área">
+          <button className="ordbtn" onClick={() => onMover("down")} disabled={borde.ultimo} title="Bajar un lugar">
             <ChevronDown size={14} />
           </button>
         </div>
