@@ -72,7 +72,8 @@ export default function Pendientes() {
   const [q, setQ] = useState("");
   const [fArea, setFArea] = useState("");
   const [fResp, setFResp] = useState("");
-  const [fEstado, setFEstado] = useState("abiertos");
+  /* Arranca sin filtro de estado: se ven todos, resueltos incluidos. */
+  const [fEstado, setFEstado] = useState("");
   const [adding, setAdding] = useState(false);
   const [mgr, setMgr] = useState(false);
   const [soloVencidas, setSoloVencidas] = useState(false);
@@ -777,8 +778,8 @@ export default function Pendientes() {
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar en descripción, equipo, documento…" />
           </div>
           <select className="sel" value={fEstado} onChange={(e) => setFEstado(e.target.value)}>
-            <option value="abiertos">Sin cerrar</option>
             <option value="">Todos los estados</option>
+            <option value="abiertos">Sin cerrar</option>
             {ORDEN_ESTADO.map((k) => <option key={k} value={k}>{ESTADOS[k].label}</option>)}
           </select>
           <select className="sel" value={fArea} onChange={(e) => setFArea(e.target.value)}>
